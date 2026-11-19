@@ -1,145 +1,222 @@
-// The story: four jobs for fixer Dante Reyes that pay off Vex's $2,000 debt to
-// loan shark Silas Kade — then repeatable taxi fares for free-roam money.
-import { dist, makeRng, pick } from './utils.js';
+// The story: four jobs for Dante Reyes to pay off Lena's $2,000 debt to
+// Silas Kade, then repeatable taxi fares. One beacon pillar marks the
+// current objective, and the HUD shows its name and distance.
 
-const PIER = { x: 0, z: 356 };
-const CHOP_SHOP = { x: -240, z: 160 };
-const PACKAGE_PICKUP = { x: 80, z: -120 };
-const DROP = { x: 240, z: -240 };
+import { dist2D, money, rand, randInt } from './utils.js';
+import { CITY } from './city.js';
 
-export const MISSIONS = [
+const MISSIONS = [
   {
-    id: 0, title: 'First Gear', reward: 200,
-    briefing: 'Dante is waiting on the pier. Go meet him and hear the job.',
-    steps: [{ type: 'goto', x: PIER.x, z: PIER.z, r: 8, label: 'Meet Dante at the pier' }],
+    name: 'First Gear',
+    briefing: 'Meet Dante at the pier',
+    pay: 200,
   },
   {
-    id: 1, title: 'The Pickup', reward: 400,
-    briefing: 'Dante needs a car, no questions asked. Steal one and bring it to the chop shop.',
-    steps: [
-      { type: 'enterCar', label: 'Steal any car (press E near one)' },
-      { type: 'deliverCar', x: CHOP_SHOP.x, z: CHOP_SHOP.z, r: 10, label: 'Deliver the car to the chop shop' },
-    ],
+    name: 'The Pickup',
+    briefing: 'Steal a car, deliver it to the chop shop',
+    pay: 400,
   },
   {
-    id: 2, title: 'Hot Wheels', reward: 600,
-    briefing: 'Kade\'s boys tipped off the cops. Get the heat on you — then shake it off.',
-    steps: [
-      { type: 'wantedAtLeast', n: 2, label: 'Get a 2-star wanted level' },
-      { type: 'wantedZero', label: 'Lose the cops — get back to 0 stars' },
-    ],
+    name: 'Hot Wheels',
+    briefing: 'Reach 2 wanted stars, then lose them',
+    pay: 600,
   },
   {
-    id: 3, title: 'The Drop', reward: 1000,
-    briefing: 'One last run. Pick up the package, then make the drop uptown. Kade\'s rivals will be waiting.',
-    steps: [
-      { type: 'goto', x: PACKAGE_PICKUP.x, z: PACKAGE_PICKUP.z, r: 8, label: 'Pick up the package' },
-      { type: 'deliver', x: DROP.x, z: DROP.z, r: 10, label: 'Make the drop — watch for rivals', spawnEnemies: true },
-    ],
+    name: 'The Drop',
+    briefing: 'Deliver the package — three rivals guard it',
+    pay: 1000,
   },
 ];
 
-export class MissionManager {
-  constructor(hooks) {
-    this.hooks = hooks; // {onToast, onComplete, onSpawnEnemies, onSave}
-    this.rng = makeRng(99);
-    this.index = 0;        // story mission index; 4 = story done
-    this.step = 0;
-    this.active = false;
-    this.taxi = null;      // active taxi job {phase, x, z, pay}
-    this.storyDone = false;
+/** A tall glowing pillar that marks the objective from across the city. */
+function buildBeacon() {
+  const mat = new THREE.MeshBasicMaterial({
+    color: 0xffc040,
+    transparent: true,
+    opacity: 0.35,
+    depthWrite: false,
+  });
+  const beacon = new THREE.Mesh(new THREE.CylinderGeometry(2.2, 2.2, 70, 16, 1, true), mat);
+  beacon.position.y = 35;
+  const diamond = new THREE.Mesh(
+    new THREE.OctahedronGeometry(1.6),
+    new THREE.MeshBasicMaterial({ color: 0xffd75e })
+  );
+  diamond.position.y = 72;
+  beacon.add(diamond);
+  return beacon;
+}
+
+export function createMissions(G) {
+  const beacon = buildBeacon();
+  beacon.position.set(CITY.pierEnd.x, 35, CITY.pierEnd.z);
+  G.scene.add(beacon);
+  const missions = {
+    index: 0,
+    phase: 0,
+    beacon,
+    fare: null,
+    rivalsSpawned: false,
+    spin: 0,
+  };
+  G.hud.showBanner(G, 'FIRST GEAR', MISSIONS[0].briefing);
+  return missions;
+}
+
+/** Where the current objective is, for the beacon, the HUD and the minimap. */
+export function currentObjective(G) {
+  const m = G.missions;
+  if (m.index < MISSIONS.length) {
+    if (m.index === 0) return { x: CITY.pierEnd.x, z: CITY.pierEnd.z, label: 'PIER' };
+    if (m.index === 1) return { x: CITY.chopShop.x, z: CITY.chopShop.z, label: 'CHOP SHOP' };
+    if (m.index === 2) return { x: G.player.pos.x, z: G.player.pos.z, label: m.phase === 0 ? 'GET 2 STARS' : 'LOSE THE HEAT' };
+    if (m.index === 3) return { x: CITY.dropSpot.x, z: CITY.dropSpot.z, label: 'DROP' };
   }
-  current() { return this.index < MISSIONS.length ? MISSIONS[this.index] : null; }
-  currentStep() {
-    const m = this.current();
-    return m ? m.steps[this.step] : null;
+  if (m.fare) {
+    if (m.fare.state === 'toPickup') return { x: m.fare.pickup.x, z: m.fare.pickup.z, label: 'PICKUP' };
+    return { x: m.fare.dropoff.x, z: m.fare.dropoff.z, label: 'DROPOFF' };
   }
-  start() {
-    this.active = true; this.step = 0;
-    const m = this.current();
-    if (m) this.hooks.onToast(m.title + ' — ' + m.briefing);
+  return { x: CITY.taxiStand.x, z: CITY.taxiStand.z, label: 'TAXI' };
+}
+
+/** Pay the player and show the reward. */
+function pay(G, amount, what) {
+  const p = G.player;
+  p.cash += amount;
+  p.debt = Math.max(0, p.debt - amount);
+  G.audio.chime();
+  G.hud.showBanner(G, what, '+' + money(amount) + '  •  debt left ' + money(p.debt));
+}
+
+/** Start the next story mission, announcing it on the HUD. */
+function startMission(G, i) {
+  const m = G.missions;
+  m.index = i;
+  m.phase = 0;
+  m.rivalsSpawned = false;
+  const def = MISSIONS[i];
+  G.hud.showBanner(G, def.name.toUpperCase(), def.briefing);
+  if (i === 3) {
+    G.combat.spawnRivals(G, CITY.dropSpot.x, CITY.dropSpot.z, 3);
+    m.rivalsSpawned = true;
   }
-  target() {
-    // returns {x, z, label} for the beacon/minimap, or null
-    if (this.taxi) return { x: this.taxi.x, z: this.taxi.z, label: this.taxi.phase === 'pickup' ? 'Pick up the fare' : 'Drop off the fare' };
-    const s = this.currentStep();
-    if (!s || s.x === undefined) return null;
-    return { x: s.x, z: s.z, label: s.label };
+}
+
+/** A random sidewalk point for a taxi pickup. */
+function pickupPoint() {
+  const vertical = Math.random() < 0.5;
+  const s = CITY.streets[Math.floor(Math.random() * CITY.streets.length)];
+  const along = rand(-140, 140);
+  const side = Math.random() < 0.5 ? -1 : 1;
+  if (vertical) return { x: s + side * 8.5, z: along };
+  return { x: along, z: s + side * 8.5 };
+}
+
+/** A random intersection for a taxi dropoff. */
+function dropoffPoint() {
+  return {
+    x: CITY.streets[Math.floor(Math.random() * CITY.streets.length)],
+    z: CITY.streets[Math.floor(Math.random() * CITY.streets.length)],
+  };
+}
+
+/** Begin a taxi fare: a waiting passenger and a destination. */
+function startFare(G) {
+  const m = G.missions;
+  const pickup = pickupPoint();
+  const mesh = new THREE.Group();
+  const body = new THREE.Mesh(new THREE.BoxGeometry(0.62, 0.7, 0.36), new THREE.MeshLambertMaterial({ color: 0xffd75e }));
+  body.position.y = 0.9;
+  body.castShadow = true;
+  mesh.add(body);
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.24, 12, 10), new THREE.MeshLambertMaterial({ color: 0xe8b88a }));
+  head.position.y = 1.45;
+  mesh.add(head);
+  const legs = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.55, 0.26), new THREE.MeshLambertMaterial({ color: 0x2a2a3a }));
+  legs.position.y = 0.28;
+  mesh.add(legs);
+  mesh.position.set(pickup.x, 0, pickup.z);
+  G.scene.add(mesh);
+  m.fare = {
+    pickup,
+    dropoff: dropoffPoint(),
+    pay: randInt(50, 110),
+    state: 'toPickup',
+    mesh,
+  };
+  G.hud.showBanner(G, 'TAXI FARE', 'Pick up the passenger in gold');
+}
+
+export function updateMissions(G, dt) {
+  const m = G.missions;
+  const p = G.player;
+  // Spin the beacon's diamond.
+  m.spin += dt;
+  const diamond = m.beacon.children[0];
+  if (diamond) {
+    diamond.rotation.y = m.spin * 1.2;
+    diamond.position.y = 72 + Math.sin(m.spin * 2) * 1.5;
   }
-  objectiveText() {
-    if (this.taxi) return this.taxi.phase === 'pickup' ? 'Taxi fare: pick up the passenger' : 'Taxi fare: drive to the destination';
-    const m = this.current();
-    if (!m) return 'Free roam — the bay is yours';
-    const s = this.currentStep();
-    return s ? s.label : m.title;
-  }
-  objectiveTitle() {
-    if (this.taxi) return 'Side Job: Taxi';
-    const m = this.current();
-    return m ? 'Mission ' + (this.index + 1) + '/4: ' + m.title : 'Debt Paid';
-  }
-  startTaxi(player) {
-    // a fare appears near the player; destination is a random far point
-    const a = this.rng() * Math.PI * 2, d = 40 + this.rng() * 60;
-    const px = player.x + Math.sin(a) * d, pz = player.z + Math.cos(a) * d;
-    const spots = [[-240, -240], [240, 240], [0, -240], [-240, 240], [200, 40], [-160, -160]];
-    const dest = pick(this.rng, spots);
-    this.taxi = { phase: 'pickup', x: px, z: pz, dx: dest[0], dz: dest[1], pay: 120 + Math.floor(this.rng() * 140) };
-    this.hooks.onToast('Taxi fare nearby — pick up the passenger');
-  }
-  update(dt, ctx) {
-    if (!this.active) return;
-    const { player, inCar, wanted } = ctx;
-    if (this.taxi) {
-      const t = this.taxi;
-      if (t.phase === 'pickup' && dist(player.x, player.z, t.x, t.z) < 6) {
-        t.phase = 'dropoff'; t.x = t.dx; t.z = t.dz;
-        this.hooks.onToast('Passenger aboard — drive to the marker');
-      } else if (t.phase === 'dropoff' && inCar && dist(player.x, player.z, t.x, t.z) < 10) {
-        ctx.cash += t.pay;
-        this.hooks.onToast('Fare complete: +$' + t.pay);
-        this.taxi = null;
-        this.hooks.onSave && this.hooks.onSave();
-        this.startTaxi(player);
+  const obj = currentObjective(G);
+  m.beacon.position.x = obj.x;
+  m.beacon.position.z = obj.z;
+  m.beacon.visible = true;
+
+  if (m.index < MISSIONS.length) {
+    const def = MISSIONS[m.index];
+    if (m.index === 0) {
+      if (dist2D(p.pos.x, p.pos.z, CITY.pierEnd.x, CITY.pierEnd.z) < 6) {
+        pay(G, def.pay, 'FIRST GEAR DONE');
+        startMission(G, 1);
       }
-      return;
+    } else if (m.index === 1) {
+      if (m.phase === 0) {
+        if (p.car) {
+          m.phase = 1;
+          G.hud.showBanner(G, 'THE PICKUP', 'Now deliver it to the chop shop');
+        }
+      } else if (p.car && dist2D(p.pos.x, p.pos.z, CITY.chopShop.x, CITY.chopShop.z) < 7) {
+        pay(G, def.pay, 'THE PICKUP DONE');
+        startMission(G, 2);
+      }
+    } else if (m.index === 2) {
+      if (m.phase === 0) {
+        if (G.police.wanted >= 2) {
+          m.phase = 1;
+          G.hud.showBanner(G, 'HOT WHEELS', 'Now lose the heat — stay quiet');
+        }
+      } else if (G.police.wanted === 0) {
+        pay(G, def.pay, 'HOT WHEELS DONE');
+        startMission(G, 3);
+      }
+    } else if (m.index === 3) {
+      if (dist2D(p.pos.x, p.pos.z, CITY.dropSpot.x, CITY.dropSpot.z) < 7) {
+        pay(G, def.pay, 'THE DROP DONE');
+        if (p.debt <= 0) {
+          G.hud.showBanner(G, 'DEBT PAID', 'Silas Kade is off your back — keep earning with taxi fares');
+        }
+        m.index = 4;
+        startFare(G);
+      }
     }
-    const m = this.current();
-    if (!m) return;
-    const s = this.currentStep();
-    if (!s) return;
-    let done = false;
-    switch (s.type) {
-      case 'goto': done = dist(player.x, player.z, s.x, s.z) < s.r; break;
-      case 'enterCar': done = inCar; break;
-      case 'deliverCar': done = inCar && dist(player.x, player.z, s.x, s.z) < s.r; break;
-      case 'deliver': done = dist(player.x, player.z, s.x, s.z) < s.r; break;
-      case 'wantedAtLeast': done = wanted >= s.n; break;
-      case 'wantedZero': done = wanted === 0; break;
+    return;
+  }
+
+  // Taxi fares after the story.
+  const f = m.fare;
+  if (!f) {
+    startFare(G);
+    return;
+  }
+  if (f.state === 'toPickup') {
+    if (p.car && dist2D(p.pos.x, p.pos.z, f.pickup.x, f.pickup.z) < 6) {
+      G.scene.remove(f.mesh);
+      f.state = 'toDrop';
+      G.hud.showBanner(G, 'PASSENGER ABOARD', 'Drive them to the gold diamond');
     }
-    if (s.spawnEnemies && !s.enemiesSpawned) {
-      s.enemiesSpawned = true;
-      this.hooks.onSpawnEnemies && this.hooks.onSpawnEnemies(s.x, s.z);
-    }
-    if (!done) return;
-    this.step++;
-    if (this.step < m.steps.length) {
-      this.hooks.onToast(m.steps[this.step].label);
-      return;
-    }
-    // mission complete
-    ctx.cash += m.reward;
-    this.hooks.onComplete && this.hooks.onComplete(m);
-    this.index++;
-    this.step = 0;
-    if (this.index >= MISSIONS.length) {
-      this.storyDone = true;
-      this.hooks.onToast('DEBT PAID — Silas Kade is off your back. The bay is yours.');
-      this.startTaxi(player);
-    } else {
-      const next = this.current();
-      this.hooks.onToast(next.title + ' — ' + next.briefing);
-    }
-    this.hooks.onSave && this.hooks.onSave();
+  } else if (p.car && dist2D(p.pos.x, p.pos.z, f.dropoff.x, f.dropoff.z) < 7) {
+    pay(G, f.pay, 'FARE DONE');
+    m.fare = null;
+    startFare(G);
   }
 }

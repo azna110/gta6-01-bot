@@ -1,59 +1,74 @@
-// Screenshot scenes behind ?shot=chase|drive|mission|start. Each one stages a real
-// moment of play — the same code the player runs, just placed on the spot — so a
-// screenshot is always an honest frame of the game.
-export function applyShot(game, name) {
-  const g = game;
-  if (name === 'start') {
-    // menu stays up; park the camera on a high view of downtown for the backdrop
-    g.state = 'menu';
-    g.player.x = 0; g.player.z = 120; g.player.camYaw = Math.PI; g.player.camPitch = 0.5;
-    g.player.model.position.set(0, 0, 120);
-    return;
+// Screenshot staging: ?shot=chase|drive|mission|start puts the game in a
+// scene that shows several systems at once, then raises window.__shotReady
+// once it has rendered. Normal players never see any of this.
+
+import { enterCar } from './vehicles.js';
+
+/** The ?shot= value, or null for a normal game. */
+export function shotParam() {
+  try {
+    return new URLSearchParams(window.location.search).get('shot');
+  } catch (e) {
+    return null;
   }
-  g.state = 'playing';
-  g.hideMenus();
-  g.hud.show();
-  g.missions.active = true;
-  if (name === 'drive' || name === 'chase') {
-    // Vex in a car with traffic around her; the chase adds three cruisers and heat
-    const startX = name === 'drive' ? -120 : 40;
-    const startZ = name === 'drive' ? 280 : 200;
-    const heading = name === 'drive' ? Math.PI / 2 : Math.PI;
-    const car = g.traffic.nearestStealable(startX, startZ, 400) || g.traffic.cars[0];
-    g.enterCar(car);
-    g.playerCar.car.x = startX; g.playerCar.car.z = startZ; g.playerCar.car.heading = heading;
-    g.playerCar.car.speed = name === 'chase' ? 26 : 15;
-    g.player.camYaw = heading + Math.PI;
-    g.missions.index = 1; g.missions.step = 1; // mid "Pickup": deliver the car
-    // keep the throttle open in shot mode so the car is still rolling at capture
-    g.driveInput = { axis: (n, p) => (p === 'KeyW' ? 1 : 0), down: () => false, wasPressed: () => false, consumeMouse: () => ({ dx: 0, dy: 0 }), consumeClick: () => false, endFrame: () => {} };
-    // pull a few traffic cars onto the same road so the street feels alive
-    const road = name === 'drive' ? 280 : 40;
-    const movers = g.traffic.cars.filter((c) => !c.parked && !c.driven).slice(0, 3);
-    movers.forEach((c, i) => {
-      if (name === 'drive') { c.axis = 'x'; c.fixed = road; c.along = startX + 40 + i * 55; c.dir = 1; }
-      else { c.axis = 'z'; c.fixed = road; c.along = startZ - 60 - i * 45; c.dir = -1; }
-      c.speed = 10;
-    });
-    if (name === 'chase') {
-      g.police.wanted = 3; g.police.quietTimer = 0;
-      g.police.spawnCruiser(40, 150); g.police.spawnCruiser(52, 230); g.police.spawnCruiser(28, 240);
-    }
+}
+
+/** Put the player in a parked car on a road, already moving. */
+function stageDrive(G, x, z, heading, speed) {
+  const car = G.vehicles.parked[0];
+  if (!car) return;
+  car.mesh.position.set(x, 0, z);
+  car.mesh.rotation.y = heading;
+  car.speed = 0;
+  enterCar(G, car);
+  car.speed = speed;
+  const p = G.player;
+  p.camYaw = heading + Math.PI;
+  p.camPitch = 0.28;
+}
+
+/** Stage the requested scene. Called once after the game starts. */
+export function stageShot(G, name) {
+  const shot = { name, wait: 4, since: performance.now() };
+  G.shot = shot;
+  if (name === 'chase') {
+    stageDrive(G, 52, -40, 0, 26);
+    G.police.wanted = 3;
+    G.police.quietTimer = 14;
+    G.missions.index = 1;
+    G.missions.phase = 1;
+    G.hud.showBanner(G, 'THE PICKUP', 'Deliver it to the chop shop');
+  } else if (name === 'drive') {
+    stageDrive(G, -160, -60, 0, 20);
+    G.missions.index = 0;
+    G.missions.phase = 0;
+    G.hud.showBanner(G, 'FIRST GEAR', 'Meet Dante at the pier');
   } else if (name === 'mission') {
-    // on foot at the pier, facing the beacon and the boats beyond it
-    g.missions.index = 0; g.missions.step = 0;
-    g.player.x = 20; g.player.z = 300; g.player.heading = -0.34;
-    g.player.camYaw = 2.8; g.player.camPitch = 0.28;
-    g.player.model.position.set(20, 0, 300);
-    g.cash = 150;
+    const p = G.player;
+    p.pos.set(-172, 0, -12);
+    p.mesh.position.set(-172, 0, -12);
+    // Face the pier end so the beacon is in frame.
+    const dx = -228 - p.pos.x;
+    const dz = 0 - p.pos.z;
+    const len = Math.sqrt(dx * dx + dz * dz) || 1;
+    p.camYaw = Math.atan2(-dx / len, -dz / len);
+    p.camPitch = 0.3;
+    p.yaw = Math.atan2(dx / len, dz / len);
+    G.missions.index = 0;
+    G.missions.phase = 0;
+    G.hud.showBanner(G, 'FIRST GEAR', 'Meet Dante at the pier');
+    shot.wait = 3;
+  } else if (name === 'start') {
+    // The start menu is already showing; just wait for it to render.
+    shot.wait = 2;
   }
-  // let traffic and pedestrians settle for a few simulated seconds
-  for (let i = 0; i < 240; i++) {
-    g.traffic.update(1 / 60, g.playerCar, null);
-    g.pedestrians.update(1 / 60);
-  }
-  if (g.playerCar) {
-    g.playerCar.car.model.position.set(g.playerCar.car.x, 0, g.playerCar.car.z);
-    g.playerCar.car.model.rotation.y = g.playerCar.car.heading;
+}
+
+/** Raise the ready flag once the scene has had time to render. */
+export function updateShot(G) {
+  if (!G.shot) return;
+  if (performance.now() - G.shot.since > G.shot.wait * 1000) {
+    window.__shotReady = true;
+    G.shot = null;
   }
 }

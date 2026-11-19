@@ -1,110 +1,171 @@
-// Pedestrians: people strolling the sidewalks who scatter when a car screams
-// past, a gun goes off, or a body drops nearby.
-import { clamp, dist, makeRng, pick, randRange } from './utils.js';
-import { ROADS } from './city.js';
+// Pedestrians: people walking the sidewalks, who flee from gunfire and can
+// be knocked down by a car (which the police notice).
 
-const SHIRTS = [0xe86a6a, 0x6aa8e8, 0x7ac47a, 0xe8c95a, 0xb06ad8, 0xe8e8e8, 0x5a5a66, 0xd88a4a];
-const PANTS = [0x2e3a5a, 0x3a3a3a, 0x5a4a3a, 0x2a4a3a];
+import { angleToward, clamp, dist2D, pick, rand } from './utils.js';
+import { CITY } from './city.js';
 
-function makePerson(rng) {
+const SHIRTS = [0x3a6a9a, 0x9a3a3a, 0x3a7a4a, 0x8a6a2a, 0x6a3a7a, 0xd8d8d8, 0x2a2a2a];
+const SKINS = [0xe8b88a, 0xc98a5a, 0x8a5a3a, 0xf0c8a0];
+
+/** A point on a sidewalk: beside a street, just off the road. */
+function sidewalkPoint() {
+  const vertical = Math.random() < 0.5;
+  const s = pick(CITY.streets);
+  const along = rand(-150, 150);
+  const side = Math.random() < 0.5 ? -1 : 1;
+  if (vertical) return { x: s + side * 8.5, z: along };
+  return { x: along, z: s + side * 8.5 };
+}
+
+/** Build one pedestrian figure: legs, torso, arms and a head. */
+function buildPedestrianMesh(shirt, skin) {
   const g = new THREE.Group();
-  const shirt = new THREE.MeshLambertMaterial({ color: pick(rng, SHIRTS) });
-  const pants = new THREE.MeshLambertMaterial({ color: pick(rng, PANTS) });
-  const skin = new THREE.MeshLambertMaterial({ color: [0xe8b88a, 0xc98a5a, 0x8a5a3a][Math.floor(rng() * 3)] });
-  const torso = new THREE.Mesh(new THREE.BoxGeometry(0.62, 0.75, 0.34), shirt);
-  torso.position.y = 1.05; torso.castShadow = true; g.add(torso);
-  const head = new THREE.Mesh(new THREE.SphereGeometry(0.24, 10, 8), skin);
-  head.position.y = 1.62; head.castShadow = true; g.add(head);
-  const hair = new THREE.Mesh(new THREE.SphereGeometry(0.25, 10, 6, 0, Math.PI * 2, 0, Math.PI / 2), new THREE.MeshLambertMaterial({ color: [0x1a1a1a, 0x4a2a1a, 0x8a8a8a][Math.floor(rng() * 3)] }));
-  hair.position.y = 1.66; g.add(hair);
-  const legL = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.7, 0.24), pants);
-  legL.position.set(-0.16, 0.35, 0); g.add(legL);
-  const legR = legL.clone(); legR.position.x = 0.16; g.add(legR);
-  const armL = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.62, 0.18), shirt);
-  armL.position.set(-0.4, 1.05, 0); g.add(armL);
-  const armR = armL.clone(); armR.position.x = 0.4; g.add(armR);
-  g.userData = { legL, legR, armL, armR };
+  const legMat = new THREE.MeshLambertMaterial({ color: 0x2a2a3a });
+  const legL = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.55, 0.24), legMat);
+  legL.position.set(-0.16, 0.28, 0);
+  legL.name = 'legL';
+  g.add(legL);
+  const legR = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.55, 0.24), legMat);
+  legR.position.set(0.16, 0.28, 0);
+  legR.name = 'legR';
+  g.add(legR);
+  const torso = new THREE.Mesh(new THREE.BoxGeometry(0.62, 0.7, 0.36), new THREE.MeshLambertMaterial({ color: shirt }));
+  torso.position.y = 0.9;
+  torso.castShadow = true;
+  g.add(torso);
+  const armMat = new THREE.MeshLambertMaterial({ color: shirt });
+  const armL = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.55, 0.18), armMat);
+  armL.position.set(-0.42, 0.88, 0);
+  armL.name = 'armL';
+  g.add(armL);
+  const armR = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.55, 0.18), armMat);
+  armR.position.set(0.42, 0.88, 0);
+  armR.name = 'armR';
+  g.add(armR);
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.24, 12, 10), new THREE.MeshLambertMaterial({ color: skin }));
+  head.position.y = 1.45;
+  head.castShadow = true;
+  g.add(head);
   return g;
 }
 
-export class Pedestrians {
-  constructor(scene, colliders) {
-    this.scene = scene; this.colliders = colliders; this.rng = makeRng(4242);
-    this.people = [];
-    for (let i = 0; i < 26; i++) this.spawn(false);
+export function createPedestrians(G) {
+  const list = [];
+  for (let i = 0; i < 18; i++) {
+    const at = sidewalkPoint();
+    const mesh = buildPedestrianMesh(pick(SHIRTS), pick(SKINS));
+    mesh.position.set(at.x, 0, at.z);
+    G.scene.add(mesh);
+    const target = sidewalkPoint();
+    list.push({
+      mesh,
+      speed: rand(1.1, 2.1),
+      target,
+      state: 'walk',
+      phase: rand(0, 6),
+      fleeTimer: 0,
+      downTimer: 0,
+      threatX: 0,
+      threatZ: 0,
+    });
   }
-  spawn(anywhere) {
-    const road = pick(this.rng, ROADS);
-    const along = anywhere ? randRange(this.rng, -280, 280) : randRange(this.rng, -280, 280);
-    const ns = this.rng() < 0.5;
-    const model = makePerson(this.rng);
-    const x = ns ? road + (this.rng() < 0.5 ? 11 : -11) : along;
-    const z = ns ? along : road + (this.rng() < 0.5 ? 11 : -11);
-    model.position.set(x, 0, z);
-    this.scene.add(model);
-    const p = { model, x, z, heading: this.rng() * Math.PI * 2, speed: randRange(this.rng, 1.2, 2.2), walkPhase: this.rng() * 6, flee: 0, panicX: 0, panicZ: 0, dead: false, road, ns, along };
-    this.people.push(p);
-    return p;
+  return list;
+}
+
+/** A gunshot nearby sends every pedestrian within radius running. */
+export function scarePedestrians(G, x, z, radius) {
+  for (const p of G.pedestrians) {
+    if (p.state === 'down') continue;
+    if (dist2D(x, z, p.mesh.position.x, p.mesh.position.z) < radius) {
+      p.state = 'flee';
+      p.fleeTimer = rand(2.5, 4);
+      p.threatX = x;
+      p.threatZ = z;
+    }
   }
-  scare(x, z, radius) {
-    for (const p of this.people) {
-      if (p.dead) continue;
-      if (dist(x, z, p.x, p.z) < radius) {
-        p.flee = 3 + this.rng() * 2;
-        p.panicX = x; p.panicZ = z;
+}
+
+/** Walk one pedestrian toward its target, swinging its limbs. */
+function stepWalk(p, dt) {
+  const m = p.mesh;
+  const dx = p.target.x - m.position.x;
+  const dz = p.target.z - m.position.z;
+  const d = Math.sqrt(dx * dx + dz * dz);
+  if (d < 1.5) {
+    p.target = sidewalkPoint();
+    return;
+  }
+  const heading = Math.atan2(dx, dz);
+  m.rotation.y = angleToward(m.rotation.y, heading, 3.5 * dt);
+  m.position.x += Math.sin(m.rotation.y) * p.speed * dt;
+  m.position.z += Math.cos(m.rotation.y) * p.speed * dt;
+  p.phase += dt * p.speed * 4.5;
+  const swing = Math.sin(p.phase) * 0.5;
+  m.getObjectByName('legL').rotation.x = swing;
+  m.getObjectByName('legR').rotation.x = -swing;
+  m.getObjectByName('armL').rotation.x = -swing * 0.8;
+  m.getObjectByName('armR').rotation.x = swing * 0.8;
+}
+
+/** A car moving fast that touches a pedestrian knocks them down. */
+function checkCarHit(G, p) {
+  if (p.state === 'down') return;
+  const m = p.mesh;
+  const cars = G.vehicles.traffic.slice();
+  if (G.player.car) cars.push(G.player.car);
+  for (const car of cars) {
+    const d = dist2D(m.position.x, m.position.z, car.mesh.position.x, car.mesh.position.z);
+    if (d < 2.2 && Math.abs(car.speed) > 3) {
+      p.state = 'down';
+      p.downTimer = 7;
+      // Fall flat on the ground.
+      m.rotation.x = -Math.PI / 2;
+      m.position.y = 0.35;
+      G.police.addHeat(G, 1);
+      G.audio.crash(0.3);
+      G.hud.showBanner(G, 'PEDESTRIAN DOWN', 'The police saw that — wanted level up');
+      return;
+    }
+  }
+}
+
+export function updatePedestrians(G, dt) {
+  for (const p of G.pedestrians) {
+    const m = p.mesh;
+    if (p.state === 'down') {
+      p.downTimer -= dt;
+      if (p.downTimer <= 0) {
+        // Get up, dust off, and run away from the scene.
+        m.rotation.x = 0;
+        m.position.y = 0;
+        p.state = 'flee';
+        p.fleeTimer = 4;
+        p.threatX = m.position.x;
+        p.threatZ = m.position.z;
       }
+      continue;
     }
-  }
-  // returns people hit by a car circle (radius r) at (x,z)
-  hitByCar(x, z, r) {
-    const hit = [];
-    for (const p of this.people) {
-      if (p.dead) continue;
-      if (dist(x, z, p.x, p.z) < r + 0.6) { p.dead = true; hit.push(p); }
-    }
-    return hit;
-  }
-  update(dt) {
-    let gone = 0;
-    for (const p of this.people) {
-      if (p.dead) {
-        // fallen: lie flat, then vanish and be replaced by a fresh walker
-        p.model.rotation.x = Math.max(-Math.PI / 2, p.model.rotation.x - dt * 2);
-        p.model.position.y = Math.max(0.25, p.model.position.y - dt * 0.2);
-        p.respawn = (p.respawn || 0) + dt;
-        if (p.respawn > 14) { this.scene.remove(p.model); p.gone = true; gone++; }
+    if (p.state === 'flee') {
+      p.fleeTimer -= dt;
+      if (p.fleeTimer <= 0) {
+        p.state = 'walk';
+        p.target = sidewalkPoint();
         continue;
       }
-      let speed = p.speed, heading = p.heading;
-      if (p.flee > 0) {
-        p.flee -= dt;
-        speed = 5.5;
-        heading = Math.atan2(p.x - p.panicX, p.z - p.panicZ);
-      } else if (this.rng() < dt * 0.05) {
-        heading = this.rng() * Math.PI * 2;
-      }
-      p.heading = heading;
-      let nx = p.x + Math.sin(heading) * speed * dt;
-      let nz = p.z + Math.cos(heading) * speed * dt;
-      // stay inside the city and out of buildings
-      nx = clamp(nx, -296, 296); nz = clamp(nz, -296, 296);
-      let blocked = false;
-      for (const b of this.colliders) {
-        if (nx > b.minX - 0.5 && nx < b.maxX + 0.5 && nz > b.minZ - 0.5 && nz < b.maxZ + 0.5) { blocked = true; break; }
-      }
-      if (!blocked) { p.x = nx; p.z = nz; }
-      else p.heading = heading + Math.PI / 2;
-      p.walkPhase += dt * speed * 3.2;
-      const swing = Math.sin(p.walkPhase) * 0.55;
-      const u = p.model.userData;
-      u.legL.rotation.x = swing; u.legR.rotation.x = -swing;
-      u.armL.rotation.x = -swing * 0.7; u.armR.rotation.x = swing * 0.7;
-      p.model.position.set(p.x, 0, p.z);
-      p.model.rotation.y = p.heading;
+      const away = Math.atan2(m.position.x - p.threatX, m.position.z - p.threatZ);
+      m.rotation.y = angleToward(m.rotation.y, away, 4 * dt);
+      m.position.x += Math.sin(m.rotation.y) * 4.2 * dt;
+      m.position.z += Math.cos(m.rotation.y) * 4.2 * dt;
+      p.phase += dt * 14;
+      const swing = Math.sin(p.phase) * 0.6;
+      m.getObjectByName('legL').rotation.x = swing;
+      m.getObjectByName('legR').rotation.x = -swing;
+      // Stay inside the city.
+      m.position.x = clamp(m.position.x, -180, 180);
+      m.position.z = clamp(m.position.z, -180, 180);
+      continue;
     }
-    if (gone > 0) {
-      this.people = this.people.filter((p) => !p.gone);
-      for (let i = 0; i < gone; i++) this.spawn(true);
-    }
+    stepWalk(p, dt);
+    checkCarHit(G, p);
   }
 }

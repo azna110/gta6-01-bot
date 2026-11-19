@@ -1,43 +1,102 @@
-// Small math and random helpers shared by every Velvet Bay system.
-export function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
-export function lerp(a, b, t) { return a + (b - a) * t; }
-export function lerpAngle(a, b, t) {
-  let d = (b - a) % (Math.PI * 2);
-  if (d > Math.PI) d -= Math.PI * 2;
-  if (d < -Math.PI) d += Math.PI * 2;
-  return a + d * t;
+// Shared math and list helpers for Velvet Bay. Every system imports these;
+// nothing here touches the scene or the game state.
+
+export const TAU = Math.PI * 2;
+
+/** Clamp a value into [min, max]. */
+export function clamp(v, min, max) {
+  return v < min ? min : v > max ? max : v;
 }
-export function dist2(ax, az, bx, bz) { const dx = ax - bx, dz = az - bz; return dx * dx + dz * dz; }
-export function dist(ax, az, bx, bz) { return Math.sqrt(dist2(ax, az, bx, bz)); }
-export function angleTo(ax, az, bx, bz) { return Math.atan2(bx - ax, bz - az); }
-// Deterministic mulberry32 so the city layout is identical on every load.
-export function makeRng(seed) {
-  let a = seed >>> 0;
-  return function () {
-    a |= 0; a = (a + 0x6D2B79F5) | 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
+
+/** Linear interpolation between a and b. */
+export function lerp(a, b, t) {
+  return a + (b - a) * t;
 }
-export function pick(rng, arr) { return arr[Math.floor(rng() * arr.length)]; }
-export function randRange(rng, lo, hi) { return lo + rng() * (hi - lo); }
-// Circle vs axis-aligned box push-out. Returns true when a push happened.
-export function resolveCircleBox(px, pz, r, box, out) {
-  const cx = clamp(px, box.minX, box.maxX), cz = clamp(pz, box.minZ, box.maxZ);
-  const dx = px - cx, dz = pz - cz, d2 = dx * dx + dz * dz;
+
+/** A random number in [min, max). */
+export function rand(min, max) {
+  return min + Math.random() * (max - min);
+}
+
+/** A random integer in [min, max]. */
+export function randInt(min, max) {
+  return Math.floor(rand(min, max + 1));
+}
+
+/** One random element of an array. */
+export function pick(arr) {
+  return arr[Math.floor(Math.random() * arr.length)];
+}
+
+/** Shortest signed angular difference from a to b, in (-PI, PI]. */
+export function angleDiff(a, b) {
+  let d = (b - a) % TAU;
+  if (d > Math.PI) d -= TAU;
+  if (d <= -Math.PI) d += TAU;
+  return d;
+}
+
+/** Move angle a toward b by at most step radians, taking the short way. */
+export function angleToward(a, b, step) {
+  const d = angleDiff(a, b);
+  if (Math.abs(d) <= step) return b;
+  return a + Math.sign(d) * step;
+}
+
+/** Distance between two points on the ground plane. */
+export function dist2D(ax, az, bx, bz) {
+  const dx = ax - bx;
+  const dz = az - bz;
+  return Math.sqrt(dx * dx + dz * dz);
+}
+
+/** True when a circle (x, z, r) overlaps an axis-aligned box on the ground. */
+export function circleHitsBox(x, z, r, box) {
+  const cx = clamp(x, box.minX, box.maxX);
+  const cz = clamp(z, box.minZ, box.maxZ);
+  const dx = x - cx;
+  const dz = z - cz;
+  return dx * dx + dz * dz < r * r;
+}
+
+/**
+ * Push a circle out of an axis-aligned box. Returns true when it overlapped.
+ * Mutates the given position object ({x, z}) to the closest free spot.
+ */
+export function pushCircleOutOfBox(p, r, box) {
+  const cx = clamp(p.x, box.minX, box.maxX);
+  const cz = clamp(p.z, box.minZ, box.maxZ);
+  let dx = p.x - cx;
+  let dz = p.z - cz;
+  const d2 = dx * dx + dz * dz;
   if (d2 >= r * r) return false;
-  if (d2 > 1e-8) {
-    const d = Math.sqrt(d2), push = (r - d) / d;
-    out.x = px + dx * push; out.z = pz + dz * push;
+  if (d2 > 1e-9) {
+    const d = Math.sqrt(d2);
+    const push = (r - d) / d;
+    p.x += dx * push;
+    p.z += dz * push;
   } else {
-    // Center inside the box: push out along the smallest penetration axis.
-    const pl = px - box.minX, pr = box.maxX - px, pt = pz - box.minZ, pb = box.maxZ - pz;
-    const m = Math.min(pl, pr, pt, pb);
-    if (m === pl) { out.x = box.minX - r; out.z = pz; }
-    else if (m === pr) { out.x = box.maxX + r; out.z = pz; }
-    else if (m === pt) { out.x = px; out.z = box.minZ - r; }
-    else { out.x = px; out.z = box.maxZ + r; }
+    // Center is inside the box: push out along the smallest penetration axis.
+    const left = p.x - box.minX;
+    const right = box.maxX - p.x;
+    const back = p.z - box.minZ;
+    const front = box.maxZ - p.z;
+    const m = Math.min(left, right, back, front);
+    if (m === left) p.x = box.minX - r;
+    else if (m === right) p.x = box.maxX + r;
+    else if (m === back) p.z = box.minZ - r;
+    else p.z = box.maxZ + r;
   }
   return true;
+}
+
+/** Format a number of dollars as $1,234. */
+export function money(n) {
+  return '$' + Math.round(n).toLocaleString('en-US');
+}
+
+/** Format seconds as M:SS. */
+export function clockText(sec) {
+  const s = Math.max(0, Math.floor(sec));
+  return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
 }
