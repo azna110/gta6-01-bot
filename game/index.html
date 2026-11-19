@@ -3,17 +3,123 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Block Dodger</title>
+<title>Velvet Bay — Open World Crime</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' fill='%23ffd23e'/%3E%3Ctext x='8' y='12' font-size='11' text-anchor='middle' font-family='sans-serif' font-weight='bold' fill='%231a1030'%3EV%3C/text%3E%3C/svg%3E">
 <style>
-  html, body { margin: 0; height: 100%; overflow: hidden; background: #11141b; }
-  #game { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
-  /* Read aloud, never shown: the status line screen readers announce. */
-  #status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #0b0e1a;
+    font-family: "Trebuchet MS", Verdana, sans-serif; color: #fff; }
+  #app { position: fixed; inset: 0; }
+  #app canvas { display: block; }
+  .hidden { display: none !important; }
+  #hud { position: fixed; inset: 0; pointer-events: none; z-index: 5; }
+  #top-left { position: absolute; top: 14px; left: 16px; }
+  #health-wrap { width: 220px; height: 14px; background: rgba(0,0,0,.55); border: 1px solid rgba(255,255,255,.35); border-radius: 7px; overflow: hidden; }
+  #health-fill { height: 100%; width: 100%; background: linear-gradient(90deg, #37d67a, #7be495); transition: width .2s; }
+  #cash { margin-top: 6px; font-size: 22px; font-weight: bold; color: #7dff9e; text-shadow: 0 2px 4px #000; letter-spacing: 1px; }
+  #top-right { position: absolute; top: 12px; right: 18px; font-size: 30px; letter-spacing: 4px; color: #ffd23e; text-shadow: 0 0 8px rgba(255,180,0,.8), 0 2px 4px #000; }
+  #top-right .dim { color: rgba(255,255,255,.25); text-shadow: none; }
+  #objective { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); text-align: center;
+    background: rgba(0,0,0,.5); border: 1px solid rgba(255,210,62,.6); border-radius: 8px; padding: 8px 18px; max-width: 560px; }
+  #obj-title { font-size: 15px; font-weight: bold; color: #ffd23e; letter-spacing: 2px; text-transform: uppercase; }
+  #obj-text { font-size: 14px; margin-top: 2px; }
+  #obj-dist { font-size: 12px; color: #9fd8ff; margin-top: 2px; }
+  #map-wrap { position: absolute; left: 16px; bottom: 16px; border: 2px solid rgba(255,255,255,.5); border-radius: 50%;
+    overflow: hidden; width: 200px; height: 200px; background: rgba(10,14,26,.8); box-shadow: 0 4px 18px rgba(0,0,0,.6); }
+  #minimap { width: 200px; height: 200px; display: block; }
+  #speedo { position: absolute; right: 20px; bottom: 18px; text-align: right; text-shadow: 0 2px 4px #000; }
+  #speed { font-size: 44px; font-weight: bold; line-height: 1; }
+  #speed small { font-size: 15px; color: #cfe6ff; }
+  #car-health { font-size: 13px; color: #ffb3b3; margin-top: 2px; }
+  #crosshair { position: absolute; left: 50%; top: 50%; width: 22px; height: 22px; margin: -11px 0 0 -11px; }
+  #crosshair::before, #crosshair::after { content: ""; position: absolute; background: #fff; box-shadow: 0 0 3px #000; }
+  #crosshair::before { left: 10px; top: 0; width: 2px; height: 22px; }
+  #crosshair::after { left: 0; top: 10px; width: 22px; height: 2px; }
+  #hint { position: absolute; left: 50%; bottom: 22px; transform: translateX(-50%); font-size: 14px;
+    background: rgba(0,0,0,.55); padding: 6px 14px; border-radius: 6px; white-space: nowrap; }
+  #hint b { color: #ffd23e; }
+  #toast { position: absolute; left: 50%; top: 96px; transform: translateX(-50%); font-size: 20px; font-weight: bold;
+    color: #7dff9e; text-shadow: 0 2px 6px #000; opacity: 0; transition: opacity .3s; text-align: center; }
+  #ammo { position: absolute; right: 20px; bottom: 96px; font-size: 18px; text-shadow: 0 2px 4px #000; }
+  #vignette { position: fixed; inset: 0; pointer-events: none; z-index: 4; opacity: 0;
+    background: radial-gradient(ellipse at center, transparent 55%, rgba(255,0,0,.55) 100%); transition: opacity .15s; }
+  .overlay { position: fixed; inset: 0; z-index: 10; display: flex; align-items: center; justify-content: center;
+    background: radial-gradient(ellipse at 50% 30%, rgba(64,32,96,.72), rgba(8,8,20,.88)); pointer-events: auto; }
+  .panel { text-align: center; max-width: 640px; padding: 28px 34px; }
+  .game-title { font-size: 64px; font-weight: bold; letter-spacing: 6px;
+    background: linear-gradient(180deg, #ffe27a, #ff7a3c 55%, #e83e8c); -webkit-background-clip: text; background-clip: text; color: transparent;
+    text-shadow: 0 4px 24px rgba(255,120,60,.35); }
+  .game-sub { font-size: 16px; letter-spacing: 6px; color: #9fd8ff; margin-top: 2px; text-transform: uppercase; }
+  .story { margin: 18px auto 6px; font-size: 15px; line-height: 1.55; color: #e8e4ff; text-align: left; }
+  .controls { margin: 14px auto; font-size: 13px; line-height: 1.8; color: #c9c4e8; text-align: left; columns: 2; column-gap: 28px; }
+  .controls b { color: #ffd23e; }
+  .btn { pointer-events: auto; cursor: pointer; display: inline-block; margin: 8px 6px 0; padding: 12px 28px; font-size: 17px;
+    font-weight: bold; letter-spacing: 1px; color: #1a1030; background: linear-gradient(180deg, #ffd23e, #ff9a3c);
+    border: none; border-radius: 8px; box-shadow: 0 4px 0 #b35c00, 0 6px 18px rgba(0,0,0,.5); }
+  .btn:hover { filter: brightness(1.08); }
+  .btn:active { transform: translateY(3px); box-shadow: 0 1px 0 #b35c00; }
+  .btn.ghost { background: rgba(255,255,255,.14); color: #fff; box-shadow: 0 4px 0 rgba(255,255,255,.25); }
+  #end-title { font-size: 58px; font-weight: bold; letter-spacing: 8px; color: #ff5252; text-shadow: 0 4px 20px rgba(255,0,0,.6); }
+  #end-text { margin: 12px 0 6px; font-size: 16px; color: #e8e4ff; }
+  .tiny { margin-top: 14px; font-size: 12px; color: #8f8ab0; }
 </style>
 </head>
 <body>
-<canvas id="game" aria-label="Block Dodger: move the paddle left and right to dodge falling blocks and catch coins"></canvas>
-<p id="status" role="status" aria-live="polite"></p>
-<script type="module" src="./src/main.js"></script>
+<div id="app"></div>
+<div id="vignette"></div>
+<div id="hud" class="hidden">
+  <div id="top-left"><div id="health-wrap"><div id="health-fill"></div></div><div id="cash">$0</div></div>
+  <div id="top-right"></div>
+  <div id="objective" class="hidden"><div id="obj-title"></div><div id="obj-text"></div><div id="obj-dist"></div></div>
+  <div id="map-wrap"><canvas id="minimap" width="200" height="200"></canvas></div>
+  <div id="speedo" class="hidden"><div id="speed">0 <small>mph</small></div><div id="car-health"></div></div>
+  <div id="ammo" class="hidden">12 / &infin;</div>
+  <div id="crosshair" class="hidden"></div>
+  <div id="hint" class="hidden"></div>
+  <div id="toast"></div>
+</div>
+
+<div id="menu" class="overlay">
+  <div class="panel">
+    <div class="game-title">VELVET BAY</div>
+    <div class="game-sub">An Open-World Crime Story</div>
+    <p class="story">Sun-soaked streets, fast cars, bad decisions. <b>Lena "Vex" Marlowe</b> drove getaway
+    for the wrong people and now owes loan shark <b>Silas Kade</b> $2,000. Her old fixer <b>Dante Reyes</b>
+    has work for her — steal cars, outrun the law, make the drop. Pay the debt. Get out clean.
+    Or stay and own the whole bay.</p>
+    <div class="controls">
+      <div><b>W A S D</b> — move / drive</div><div><b>Mouse</b> — look / aim</div>
+      <div><b>Shift</b> — sprint</div><div><b>Space</b> — jump / handbrake</div>
+      <div><b>E</b> — enter / exit car</div><div><b>Click</b> — shoot pistol</div>
+      <div><b>F</b> — punch</div><div><b>R</b> — reload</div>
+      <div><b>P / Esc</b> — pause</div><div><b>M</b> — mute sound</div>
+    </div>
+    <button class="btn" id="btn-new">NEW GAME</button>
+    <button class="btn ghost hidden" id="btn-continue">CONTINUE</button>
+    <div class="tiny">A 100% original game. No real city, no real people, no borrowed names.</div>
+  </div>
+</div>
+
+<div id="pause" class="overlay hidden">
+  <div class="panel">
+    <div class="game-title" style="font-size:44px">PAUSED</div>
+    <p class="story" style="text-align:center">Velvet Bay waits for no one. Except right now.</p>
+    <button class="btn" id="btn-resume">RESUME</button>
+    <button class="btn ghost" id="btn-mute">SOUND: ON</button>
+    <button class="btn ghost" id="btn-restart">RESTART MISSION</button>
+    <button class="btn ghost" id="btn-quit">QUIT TO MENU</button>
+  </div>
+</div>
+
+<div id="end" class="overlay hidden">
+  <div class="panel">
+    <div id="end-title">BUSTED</div>
+    <div id="end-text"></div>
+    <button class="btn" id="btn-respawn">GET BACK OUT THERE</button>
+  </div>
+</div>
+
+<script src="vendor/three.min.js"></script>
+<script type="module" src="src/main.js"></script>
 </body>
 </html>
